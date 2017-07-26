@@ -1,4 +1,4 @@
-CFLAGS=
+CFLAGS=-Ofast
 LIBS=-Iinclude
 
 OBJFILES = main.o BMP.o
