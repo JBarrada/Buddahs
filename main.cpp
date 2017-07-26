@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <complex>
 #include <cmath>
+#include <thread>
 
 using namespace std;
 
@@ -21,11 +22,11 @@ const complex<double> center(0.0, 0.0);
 const double zoom = 4.0;
 const double exp_zoom = exp(zoom * log(1.1));
 
-const complex<double> vp_center(-1.18, 0.0);
-const double vp_zoom = -36.0;
+const complex<double> vp_center(-1.76, 0.0);
+const double vp_zoom = -30.0;
 const double vp_exp_zoom = exp(vp_zoom * log(1.1));
 
-const int max_calc = 1000;
+const int max_calc = 500;
 
 double image_buffer[bmp_width][bmp_height][3];
 double image_max[3] = {0,0,0};
@@ -41,8 +42,11 @@ const int metro_threads = 200;
 double l[metro_threads];
 double o[metro_threads];
 
-complex<double> current_orbit[max_calc];
-int current_orbit_length = 0;
+const int cores = 8;
+const int max_episodes = 500000;
+
+//complex<double> current_orbit[max_calc];
+//int current_orbit_length = 0;
 
 double complex_distance(complex<double> a, complex<double> b) {
 	return ((a.real() - b.real())*(a.real() - b.real()) + (a.imag() - b.imag())*(a.imag() - b.imag()));
@@ -82,7 +86,7 @@ bool on_screen(int x, int y) {
 	return ((x >= 0 && x < bmp_width) && (y >= 0 && y < bmp_height));
 }
 
-bool evaluate(complex<double> z, int max_calc_local) {
+bool evaluate(complex<double> z, int max_calc_local, complex<double> *current_orbit, int &current_orbit_length) {
 	current_orbit_length = 0;
 	
 	complex<double> zc(z);
@@ -118,7 +122,7 @@ complex<double> mutate(complex<double> &c) {
 	}
 }
 
-double get_contribution() {
+double get_contribution(complex<double> *current_orbit, int &current_orbit_length) {
 	int x, y;
 	
 	double contribution = 0;
@@ -143,6 +147,9 @@ double get_transition_probability(double q1, double q2, double olen1, double ole
 }
 
 bool find_initial_sample(complex<double> &c, double x, double y, double rad, int f) {
+	complex<double> current_orbit[max_calc];
+	int current_orbit_length = 0;
+	
 	//printf("find_initial_sample(c=(%0.2f, %0.2f), x=%0.2f, y=%0.2f, rad=%0.2f, f=%d)\n", c.real(), c.imag(), x, y, rad, f);
 	if (f > 500)
 		return false;
@@ -155,11 +162,11 @@ bool find_initial_sample(complex<double> &c, double x, double y, double rad, int
 		random_complex_range(tmp, rad);
 		tmp += *(new complex<double>(x, y));
 		
-		if (!evaluate(tmp, max_calc)) {
+		if (!evaluate(tmp, max_calc, current_orbit, current_orbit_length)) {
 			continue;
 		}
 		
-		if (get_contribution() > 0.0) {
+		if (get_contribution(current_orbit, current_orbit_length) > 0.0) {
 			c = tmp;
 			return true;
 		}
@@ -176,6 +183,9 @@ bool find_initial_sample(complex<double> &c, double x, double y, double rad, int
 }
 
 void build_initial_sample_points() {
+	complex<double> current_orbit[max_calc];
+	int current_orbit_length = 0;
+	
 	z_samples.clear();
 	c_samples.clear();
 	
@@ -189,13 +199,16 @@ void build_initial_sample_points() {
 			continue;
 		}
 
-		evaluate(m, max_calc);
+		evaluate(m, max_calc, current_orbit, current_orbit_length);
 		z_samples.push_back(m);
-		c_samples.push_back(get_contribution());
+		c_samples.push_back(get_contribution(current_orbit, current_orbit_length));
 	}
 }
 
 void warmup() {
+	complex<double> current_orbit[max_calc];
+	int current_orbit_length = 0;
+	
 	complex<double> n_sample;
 	double n_contrib;
 	
@@ -205,11 +218,11 @@ void warmup() {
 			
 			n_sample = mutate(z_samples[s]);
 			
-			if (!evaluate(n_sample, max_calc)) {
+			if (!evaluate(n_sample, max_calc, current_orbit, current_orbit_length)) {
 				continue;
 			}
 			
-			n_contrib = get_contribution();
+			n_contrib = get_contribution(current_orbit, current_orbit_length);
 			
 			if (n_contrib == 0) {
 				continue;
@@ -247,31 +260,26 @@ void draw_orbit(int color, double g, complex<double> *orbit, int len) {
 	}
 }
 
-void render() {
+void render(int sample_min, int sample_max) {
+	complex<double> current_orbit[max_calc];
+	int current_orbit_length = 0;
+	
 	complex<double> n_sample;
 	double n_contrib;
 	
-	/*
-	uint8_t pixel[3];
-	pixel[0] = 255;
-	pixel[1] = 0;
-	pixel[2] = 255;
-	*/
+	int calc_length = max_calc / 100;
 	
-	int max_episodes = 1000000;
+	int color = 2;
 	
 	for (int episode = 0; episode < max_episodes; episode++) {
-		for (int s = 0; s < z_samples.size(); s++) {
-			int calc_length = max_calc / 100;
-			
+		for (int s = sample_min; s < sample_max; s++) {
 			n_sample = mutate(z_samples[s]);
-			
-			//if (!evaluate(n_sample, i*pow(10, calc_length))) {
-			if (!evaluate(n_sample, max_calc)) {
+
+			if (!evaluate(n_sample, max_calc, current_orbit, current_orbit_length)) {
 				continue;
 			}
 			
-			n_contrib = get_contribution();
+			n_contrib = get_contribution(current_orbit, current_orbit_length);
 			
 			if (n_contrib == 0) {
 				continue;
@@ -280,42 +288,22 @@ void render() {
 			double t1 = get_transition_probability(calc_length, l[s], current_orbit_length, o[s]);
 			double t2 = get_transition_probability(l[s], calc_length, o[s], current_orbit_length);
 			
-			double alpha = min((double)1.0, exp(log(n_contrib*t1)-log(c_samples[s]*t2)));
+			double alpha = min(1.0, exp(log(n_contrib*t1)-log(c_samples[s]*t2)));
 			double r = random_range(0, 1.0);
 			
-			
-			//printf("alpha=%f  r=%f\n", alpha, r);
-			
+
 			if (alpha > r) {
 				c_samples[s] = n_contrib;
 				z_samples[s] = n_sample;
 				
 				l[s] = calc_length;
 				o[s] = current_orbit_length;
-				
-				
-				int color = 2;
-				if (current_orbit_length < (max_calc / 50.0))
-					color = 0;
-				if (current_orbit_length < (max_calc / 10.0))
-					color = 1;
-				
-				draw_orbit(color, 1, current_orbit, current_orbit_length);
-				
-				/*
-				int x, y;
-				complex_to_screen(n_sample, x, y);
-				mandelbrot.set_pixel(x, y, pixel);
-				*/
-			} else {
-				int color = 2;
-				if (current_orbit_length < (max_calc / 50.0))
-					color = 0;
-				if (current_orbit_length < (max_calc / 10.0))
-					color = 1;
-				
-				draw_orbit(color, 1, current_orbit, current_orbit_length);
-			}
+			} 
+			color = 2;
+			if (current_orbit_length < (max_calc / 50.0)) color = 0;
+			if (current_orbit_length < (max_calc / 10.0)) color = 1;
+			draw_orbit(color, 1, current_orbit, current_orbit_length);
+			
 		}
 		
 		if (episode % (max_episodes / 100) == 0) {
@@ -325,6 +313,9 @@ void render() {
 }
 
 void draw_mandelbrot() {
+	complex<double> current_orbit[max_calc];
+	int current_orbit_length = 0;
+	
 	uint8_t pixel[3];
 	
 	double x_norm, y_norm;
@@ -336,7 +327,7 @@ void draw_mandelbrot() {
 			
 			complex<double> z(x_norm*exp_zoom + center.real(), (y_norm*exp_zoom + center.imag()) / aspect);
 			
-			if (evaluate(z, max_calc / 5)) {
+			if (evaluate(z, max_calc / 5, current_orbit, current_orbit_length)) {
 				pixel[0] = pixel[1] = pixel[2] = 255;
 				mandelbrot.set_pixel(x, y, pixel);
 			}
@@ -363,9 +354,24 @@ void draw_mandelbrot() {
 int main() {
 	build_initial_sample_points();
 	//warmup();
-	render();
+	//render(0, z_samples.size());
 	
+	//std::thread test(build_initial_sample_points);
 	//draw_mandelbrot();
+	
+	
+	std::thread render_threads[cores];
+	
+	int samples_core = z_samples.size() / cores;
+	
+	for (int i = 0; i < cores; i++) {
+		render_threads[i] = std::thread(render, samples_core * i, (samples_core * i) + samples_core);
+	}
+	
+	for (int i = 0; i < cores; i++) {
+		render_threads[i].join();
+	}
+	
 	
 	uint8_t pixel[3];
 	double global_image_max = max(max(image_max[0], image_max[1]), image_max[2]);
